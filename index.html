@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1a1208">
+<title>ハゼ検知器</title>
+<style>
+  :root {
+    --bg:        #1a1208;
+    --surface:   #251a0c;
+    --border:    #3d2e18;
+    --text:      #f0e6d0;
+    --muted:     #8a7560;
+    --green:     #4caf82;
+    --red:       #d4603a;
+    --amber:     #c8922a;
+    --font:      'Helvetica Neue', Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    padding: 1rem;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  header .icon { font-size: 28px; }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
+  header p  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  #status-badge {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--surface);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  #status-badge.active { background: #0d2e1e; color: var(--green); border-color: var(--green); }
+
+  .counts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 1rem;
+  }
+  .count-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem;
+    text-align: center;
+  }
+  .count-card .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .count-card .number { font-size: 36px; font-weight: 300; letter-spacing: -0.02em; }
+  .count-card.haze1 .number { color: var(--amber); }
+  .count-card.haze2 .number { color: var(--red); }
+  .count-card .unit { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  .panel-title { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+
+  canvas#waveform {
+    width: 100%;
+    height: 90px;
+    display: block;
+    border-radius: 6px;
+    background: var(--bg);
+  }
+
+  .meter-wrap { position: relative; height: 18px; background: var(--bg); border-radius: 4px; overflow: visible; }
+  #peak-bar { height: 100%; width: 0%; background: var(--green); border-radius: 4px; transition: width 0.04s; }
+  #threshold-marker {
+    position: absolute; top: -3px; width: 2px; height: 24px;
+    background: var(--red); border-radius: 1px;
+  }
+  .meter-labels { display: flex; justify-content: space-between; margin-top: 5px; }
+  .meter-labels span { font-size: 10px; color: var(--muted); }
+  #thresh-label { color: var(--red); }
+
+  .params { display: flex; flex-direction: column; gap: 14px; }
+  .param-row {}
+  .param-top { display: flex; justify-content: space-between; margin-bottom: 5px; }
+  .param-top label { font-size: 13px; color: var(--text); }
+  .param-top span  { font-size: 13px; font-weight: 500; color: var(--amber); }
+  input[type=range] {
+    width: 100%; accent-color: var(--amber);
+    height: 4px; cursor: pointer;
+  }
+
+  #log {
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    max-height: 90px;
+    overflow-y: auto;
+    line-height: 1.6;
+  }
+  #log .ev1 { color: var(--amber); }
+  #log .ev2 { color: var(--red); }
+  #log .err { color: #e05050; }
+
+  .buttons { display: flex; gap: 8px; margin-top: 1rem; }
+  button {
+    flex: 1; padding: 12px 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  button:hover:not(:disabled) { background: var(--border); }
+  button:disabled { opacity: 0.35; cursor: default; }
+  #start-btn { border-color: var(--green); color: var(--green); }
+  #start-btn:hover:not(:disabled) { background: #0d2e1e; }
+  #stop-btn  { border-color: var(--red);   color: var(--red);   }
+  #stop-btn:hover:not(:disabled)  { background: #2e150d; }
+  #reset-btn { flex: 0 0 48px; }
+
+  footer { text-align: center; margin-top: 1.5rem; font-size: 10px; color: var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="icon">☕</div>
+  <div>
+    <h1>ハゼ検知器</h1>
+    <p>10kHz帯域 音圧リアルタイム解析</p>
+  </div>
+  <div id="status-badge">待機中</div>
+</header>
+
+<div class="counts">
+  <div class="count-card haze1">
+    <div class="label">1 ハゼ</div>
+    <div class="number" id="c1">0</div>
+    <div class="unit">回</div>
+  </div>
+  <div class="count-card haze2">
+    <div class="label">2 ハゼ</div>
+    <div class="number" id="c2">0</div>
+    <div class="unit">回</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">BPFフィルター後 波形</div>
+  <canvas id="waveform" width="340" height="90"></canvas>
+</div>
+
+<div class="panel">
+  <div class="panel-title">ピークレベル</div>
+  <div class="meter-wrap">
+    <div id="peak-bar"></div>
+    <div id="threshold-marker"></div>
+  </div>
+  <div class="meter-labels">
+    <span>0 mV</span>
+    <span id="thresh-label">閾値: 274 mV</span>
+    <span>1000 mV</span>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">パラメータ</div>
+  <div class="params">
+    <div class="param-row">
+      <div class="param-top">
+        <label>中心周波数</label>
+        <span id="freq-out">10.0 kHz</span>
+      </div>
+      <input type="range" id="freq" min="8000" max="12000" step="100" value="10000">
+    </div>
+    <div class="param-row">
+      <div class="param-top">
+        <label>Q値（鋭さ）</label>
+        <span id="q-out">20</span>
+      </div>
+      <input type="range" id="qval" min="5" max="50" step="1" value="20">
+    </div>
+    <div class="param-row">
+      <div class="param-top">
+        <label>検知閾値</label>
+        <span id="thresh-out">274 mV</span>
+      </div>
+      <input type="range" id="thresh" min="50" max="800" step="1" value="274">
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">ログ</div>
+  <div id="log">システム待機中...<br></div>
+</div>
+
+<div class="buttons">
+  <button id="start-btn" onclick="startDetection()">▶ 開始</button>
+  <button id="stop-btn"  onclick="stopDetection()" disabled>⏸ 停止</button>
+  <button id="reset-btn" onclick="resetCounts()">↺</button>
+</div>
+
+<footer>特許第6211223号</footer>
+
+<script>
+let audioCtx, stream, source, bpf, analyser, rafId;
+let running = false;
+let haze1 = 0, haze2 = 0;
+let threshold = 274;
+let lastHazeTime = 0;
+let popHistory = [];
+let haze1Phase = false, haze2Phase = false;
+let waveSnap = new Float32Array(256).fill(0);
+
+const canvas = document.getElementById('waveform');
+const ctx2d  = canvas.getContext('2d');
+
+// --- パラメータ更新 ---
+function updateParams() {
+  const f = +document.getElementById('freq').value;
+  const q = +document.getElementById('qval').value;
+  threshold = +document.getElementById('thresh').value;
+  document.getElementById('freq-out').textContent   = (f/1000).toFixed(1) + ' kHz';
+  document.getElementById('q-out').textContent      = q;
+  document.getElementById('thresh-out').textContent = threshold + ' mV';
+  document.getElementById('thresh-label').textContent = '閾値: ' + threshold + ' mV';
+  document.getElementById('threshold-marker').style.left = (threshold/1000*100) + '%';
+  if (bpf) { bpf.frequency.value = f; bpf.Q.value = q; }
+}
+['freq','qval','thresh'].forEach(id => document.getElementById(id).addEventListener('input', updateParams));
+updateParams();
+
+// --- ログ ---
+function log(msg, cls='') {
+  const box = document.getElementById('log');
+  const t = new Date().toLocaleTimeString('ja-JP');
+  box.innerHTML += `<span class="${cls}">${t} ${msg}</span><br>`;
+  box.scrollTop = box.scrollHeight;
+}
+
+// --- 波形描画 ---
+function drawWave() {
+  const w = canvas.width, h = canvas.height;
+  ctx2d.fillStyle = '#1a1208';
+  ctx2d.fillRect(0, 0, w, h);
+  // center line
+  ctx2d.strokeStyle = '#3d2e18';
+  ctx2d.lineWidth = 1;
+  ctx2d.setLineDash([4,4]);
+  ctx2d.beginPath(); ctx2d.moveTo(0,h/2); ctx2d.lineTo(w,h/2); ctx2d.stroke();
+  ctx2d.setLineDash([]);
+  // waveform
+  ctx2d.strokeStyle = '#4caf82';
+  ctx2d.lineWidth = 1.5;
+  ctx2d.beginPath();
+  const step = w / waveSnap.length;
+  for (let i = 0; i < waveSnap.length; i++) {
+    const x = i * step;
+    const y = h/2 - waveSnap[i] * h * 1.8;
+    i === 0 ? ctx2d.moveTo(x,y) : ctx2d.lineTo(x,y);
+  }
+  ctx2d.stroke();
+}
+drawWave();
+
+// --- ビープ ---
+function beep(freq, dur) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur/1000);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + dur/1000);
+}
+
+// --- 開始 ---
+async function startDetection() {
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    source   = audioCtx.createMediaStreamSource(stream);
+    bpf      = audioCtx.createBiquadFilter();
+    bpf.type = 'bandpass';
+    bpf.frequency.value = +document.getElementById('freq').value;
+    bpf.Q.value         = +document.getElementById('qval').value;
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.1;
+    source.connect(bpf); bpf.connect(analyser);
+    running = true;
+    document.getElementById('start-btn').disabled = true;
+    document.getElementById('stop-btn').disabled  = false;
+    const badge = document.getElementById('status-badge');
+    badge.textContent = '検知中'; badge.className = 'active';
+    log('マイク開始 — 焙煎を始めてください');
+    loop();
+  } catch(e) {
+    log('エラー: ' + e.message, 'err');
+  }
+}
+
+// --- メインループ ---
+function loop() {
+  if (!running) return;
+  const buf = new Float32Array(analyser.frequencyBinCount);
+  analyser.getFloatTimeDomainData(buf);
+  waveSnap = buf.slice(0, 256);
+
+  let peak = 0;
+  for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > peak) peak = a; }
+  const peakMv = Math.round(peak * 1000);
+  const pct = Math.min(100, peakMv / 10);
+  const bar = document.getElementById('peak-bar');
+  bar.style.width = pct + '%';
+  bar.style.background = peakMv > threshold ? '#d4603a' : '#4caf82';
+
+  const now = Date.now();
+  if (peakMv > threshold && (now - lastHazeTime) > 250) {
+    lastHazeTime = now;
+    popHistory.push(now);
+    popHistory = popHistory.filter(t => now - t < 30000);
+    const rate = popHistory.length; // 30秒間のポップ数
+
+    if (rate <= 15) {
+      // 1ハゼ（低レート）
+      haze1++;
+      document.getElementById('c1').textContent = haze1;
+      if (!haze1Phase) { haze1Phase = true; log('🟡 1ハゼ開始 ' + peakMv + 'mV  レート:' + rate, 'ev1'); beep(880, 100); }
+      else beep(660, 60);
+    } else {
+      // 2ハゼ（高レート）
+      haze2++;
+      document.getElementById('c2').textContent = haze2;
+      if (!haze2Phase) { haze2Phase = true; log('🔴 2ハゼ開始 ' + peakMv + 'mV  レート:' + rate, 'ev2'); beep(1320, 80); }
+      else beep(1100, 50);
+    }
+  }
+  drawWave();
+  rafId = requestAnimationFrame(loop);
+}
+
+// --- 停止 ---
+function stopDetection() {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (audioCtx) audioCtx.close();
+  audioCtx = null;
+  document.getElementById('start-btn').disabled = false;
+  document.getElementById('stop-btn').disabled  = true;
+  const badge = document.getElementById('status-badge');
+  badge.textContent = '停止'; badge.className = '';
+  log('停止 — 1ハゼ:' + haze1 + '回  2ハゼ:' + haze2 + '回');
+}
+
+// --- リセット ---
+function resetCounts() {
+  haze1 = 0; haze2 = 0;
+  haze1Phase = false; haze2Phase = false;
+  popHistory = [];
+  document.getElementById('c1').textContent = '0';
+  document.getElementById('c2').textContent = '0';
+  log('カウントリセット');
+}
+</script>
+</body>
+</html>
