@@ -196,6 +196,7 @@
         <span id="q-out">20</span>
       </div>
       <input type="range" id="qval" min="5" max="50" step="1" value="20">
+      <!-- Q=20: 半値幅0.5kHz / Q=10: 半値幅1kHz / Q=5: 半値幅2kHz -->
     </div>
     <div class="param-row">
       <div class="param-top">
@@ -231,11 +232,30 @@
 let audioCtx, stream, source, bpf, gainNode, analyser, rafId;
 let running = false;
 let haze1 = 0, haze2 = 0;
-let threshold = 274;
+let threshold = 274;   // 手動閾値（フェーズ1まで使用）
 let lastHazeTime = 0;
 let popHistory = [];
 let haze1Phase = false, haze2Phase = false;
 let waveSnap = new Float32Array(256).fill(0);
+
+// =====================================================
+// アダプティブ閾値＋スパイク判定（特許アルゴリズム）
+// =====================================================
+const SAMPLE_RATE   = 48000;
+// リングバッファ：直近3ms分のピーク値を記録
+// Web Audio APIのループ間隔は約11ms（fftSize=512/48000）
+// 3ms = 約0.27フレーム → フレーム単位で近似
+const RING_SIZE     = 64;          // 約64フレーム分（約0.7秒）
+let ringBuf         = new Float32Array(RING_SIZE).fill(0);
+let ringIdx         = 0;
+
+// 60秒間のピーク値履歴（アダプティブ閾値計算用）
+const AVG_WINDOW_MS = 60000;
+let peakHistory60   = [];          // { t, mv } の配列
+let adaptThreshold  = -1;          // -1 = まだ学習中
+let elapsedSec      = 0;           // 開始からの経過秒
+let startTime       = 0;
+let lastSecTick     = 0;
 
 const canvas = document.getElementById('waveform');
 const ctx2d  = canvas.getContext('2d');
@@ -245,17 +265,18 @@ function updateParams() {
   const f = +document.getElementById('freq').value;
   const q = +document.getElementById('qval').value;
   threshold = +document.getElementById('thresh').value;
-  document.getElementById('freq-out').textContent   = (f/1000).toFixed(1) + ' kHz';
-  document.getElementById('q-out').textContent      = q;
-  document.getElementById('thresh-out').textContent = threshold + ' mV';
-  document.getElementById('thresh-label').textContent = '閾値: ' + threshold + ' mV';
+  document.getElementById('freq-out').textContent    = (f/1000).toFixed(1) + ' kHz';
+  document.getElementById('q-out').textContent       = q + '  （半値幅' + (f/q/1000).toFixed(2) + 'kHz）';
+  document.getElementById('thresh-out').textContent  = threshold + ' mV';
+  document.getElementById('thresh-label').textContent= '閾値: ' + threshold + ' mV';
   document.getElementById('threshold-marker').style.left = (threshold/1000*100) + '%';
   if (bpf) { bpf.frequency.value = f; bpf.Q.value = q; }
   const db = +document.getElementById('gaindb').value;
   document.getElementById('gain-out').textContent = (db > 0 ? '+' : '') + db + ' dB';
   if (gainNode) gainNode.gain.value = Math.pow(10, db / 20);
 }
-['freq','qval','thresh','gaindb'].forEach(id => document.getElementById(id).addEventListener('input', updateParams));
+['freq','qval','thresh','gaindb'].forEach(id =>
+  document.getElementById(id).addEventListener('input', updateParams));
 updateParams();
 
 // --- ログ ---
@@ -271,13 +292,11 @@ function drawWave() {
   const w = canvas.width, h = canvas.height;
   ctx2d.fillStyle = '#1a1208';
   ctx2d.fillRect(0, 0, w, h);
-  // center line
   ctx2d.strokeStyle = '#3d2e18';
   ctx2d.lineWidth = 1;
   ctx2d.setLineDash([4,4]);
   ctx2d.beginPath(); ctx2d.moveTo(0,h/2); ctx2d.lineTo(w,h/2); ctx2d.stroke();
   ctx2d.setLineDash([]);
-  // waveform
   ctx2d.strokeStyle = '#4caf82';
   ctx2d.lineWidth = 1.5;
   ctx2d.beginPath();
@@ -294,7 +313,7 @@ drawWave();
 // --- ビープ ---
 function beep(freq, dur) {
   if (!audioCtx) return;
-  const osc = audioCtx.createOscillator();
+  const osc  = audioCtx.createOscillator();
   const gain = audioCtx.createGain();
   osc.frequency.value = freq;
   gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
@@ -306,28 +325,37 @@ function beep(freq, dur) {
 // --- 開始 ---
 async function startDetection() {
   try {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
     stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
     });
     source   = audioCtx.createMediaStreamSource(stream);
     gainNode = audioCtx.createGain();
-    const db = +document.getElementById('gaindb').value;
-    gainNode.gain.value = Math.pow(10, db / 20);
+    gainNode.gain.value = Math.pow(10, +document.getElementById('gaindb').value / 20);
     bpf      = audioCtx.createBiquadFilter();
     bpf.type = 'bandpass';
     bpf.frequency.value = +document.getElementById('freq').value;
     bpf.Q.value         = +document.getElementById('qval').value;
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0.1;
+    analyser.smoothingTimeConstant = 0.0;  // スパイク検出のためスムージングなし
     source.connect(gainNode); gainNode.connect(bpf); bpf.connect(analyser);
-    running = true;
+
+    // 状態初期化
+    running       = true;
+    startTime     = Date.now();
+    lastSecTick   = startTime;
+    elapsedSec    = 0;
+    adaptThreshold= -1;
+    peakHistory60 = [];
+    ringBuf.fill(0);
+    ringIdx = 0;
+
     document.getElementById('start-btn').disabled = true;
     document.getElementById('stop-btn').disabled  = false;
     const badge = document.getElementById('status-badge');
-    badge.textContent = '検知中'; badge.className = 'active';
-    log('マイク開始 — 焙煎を始めてください');
+    badge.textContent = '学習中'; badge.className = 'active';
+    log('開始 — 461秒まで閾値を学習します');
     loop();
   } catch(e) {
     log('エラー: ' + e.message, 'err');
@@ -337,39 +365,114 @@ async function startDetection() {
 // --- メインループ ---
 function loop() {
   if (!running) return;
+
   const buf = new Float32Array(analyser.frequencyBinCount);
   analyser.getFloatTimeDomainData(buf);
   waveSnap = buf.slice(0, 256);
 
+  // 現フレームのピーク値（mV）
   let peak = 0;
-  for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > peak) peak = a; }
+  for (let i = 0; i < buf.length; i++) {
+    const a = Math.abs(buf[i]);
+    if (a > peak) peak = a;
+  }
   const peakMv = Math.round(peak * 1000);
+
+  // リングバッファに記録
+  ringBuf[ringIdx % RING_SIZE] = peakMv;
+  ringIdx++;
+
+  // ピークメーター表示
+  const effectiveThresh = adaptThreshold > 0 ? adaptThreshold : threshold;
   const pct = Math.min(100, peakMv / 10);
   const bar = document.getElementById('peak-bar');
   bar.style.width = pct + '%';
-  bar.style.background = peakMv > threshold ? '#d4603a' : '#4caf82';
+  bar.style.background = peakMv > effectiveThresh ? '#d4603a' : '#4caf82';
 
+  // 経過時間更新（1秒ごと）
   const now = Date.now();
-  if (peakMv > threshold && (now - lastHazeTime) > 250) {
-    lastHazeTime = now;
-    popHistory.push(now);
-    popHistory = popHistory.filter(t => now - t < 30000);
-    const rate = popHistory.length; // 30秒間のポップ数
+  if (now - lastSecTick >= 1000) {
+    elapsedSec++;
+    lastSecTick = now;
 
-    if (rate <= 15) {
-      // 1ハゼ（低レート）
-      haze1++;
-      document.getElementById('c1').textContent = haze1;
-      if (!haze1Phase) { haze1Phase = true; log('🟡 1ハゼ開始 ' + peakMv + 'mV  レート:' + rate, 'ev1'); beep(880, 100); }
-      else beep(660, 60);
-    } else {
-      // 2ハゼ（高レート）
-      haze2++;
-      document.getElementById('c2').textContent = haze2;
-      if (!haze2Phase) { haze2Phase = true; log('🔴 2ハゼ開始 ' + peakMv + 'mV  レート:' + rate, 'ev2'); beep(1320, 80); }
-      else beep(1100, 50);
+    // 60秒間ピーク履歴に追加
+    peakHistory60.push({ t: now, mv: peakMv });
+    peakHistory60 = peakHistory60.filter(p => now - p.t <= AVG_WINDOW_MS);
+
+    // フェーズ1（461〜540秒）：アダプティブ閾値を学習
+    if (elapsedSec >= 461 && elapsedSec <= 540) {
+      const avg = peakHistory60.reduce((s,p) => s + p.mv, 0) / peakHistory60.length;
+      adaptThreshold = Math.round(avg);
+      document.getElementById('thresh-label').textContent =
+        '適応閾値: ' + adaptThreshold + ' mV（平均:' + Math.round(avg) + '）';
+      document.getElementById('threshold-marker').style.left =
+        Math.min(100, adaptThreshold / 10) + '%';
+      if (elapsedSec === 461) {
+        log('フェーズ1：閾値学習開始', 'ev1');
+        document.getElementById('status-badge').textContent = '学習中';
+      }
+    }
+
+    // フェーズ2（541秒〜）：ハゼ検知モード
+    if (elapsedSec === 541) {
+      log('フェーズ2：ハゼ検知開始 閾値=' + adaptThreshold + 'mV', 'ev1');
+      document.getElementById('status-badge').textContent = '検知中';
     }
   }
+
+  // =====================================================
+  // ハゼ判定（フェーズ2以降 または 手動テスト時）
+  // =====================================================
+  const activeThresh = adaptThreshold > 0 ? adaptThreshold : threshold;
+  const inDetectPhase = (adaptThreshold > 0 && elapsedSec >= 541) || adaptThreshold < 0;
+
+  if (inDetectPhase && peakMv > activeThresh && (now - lastHazeTime) > 250) {
+
+    // --- スパイク判定（特許アルゴリズム） ---
+    // 検知時点の -0.5ms〜-3ms（約2〜14フレーム前）の最大値を調べる
+    // フレーム間隔 = 512samples / 48000Hz ≈ 10.67ms
+    // -0.5ms ≈ 0.05フレーム → 1フレーム前
+    // -3.0ms ≈ 0.28フレーム → 1〜3フレーム前 を確認
+    const checkFrames = 3;  // 約3フレーム前まで（≒32ms）
+    let prePeak = 0;
+    for (let k = 1; k <= checkFrames; k++) {
+      const idx = ((ringIdx - 1 - k) + RING_SIZE * 4) % RING_SIZE;
+      if (ringBuf[idx] > prePeak) prePeak = ringBuf[idx];
+    }
+
+    // 直前に「閾値の1/4以上」の電圧がなければハゼ（突発スパイク）
+    const noiseFloor = activeThresh / 4;
+    const isHaze = prePeak < noiseFloor;
+
+    if (isHaze) {
+      lastHazeTime = now;
+      popHistory.push(now);
+      popHistory = popHistory.filter(t => now - t < 30000);
+      const rate = popHistory.length;
+
+      if (rate <= 15) {
+        haze1++;
+        document.getElementById('c1').textContent = haze1;
+        if (!haze1Phase) {
+          haze1Phase = true;
+          log('🟡 1ハゼ開始 ' + peakMv + 'mV レート:' + rate, 'ev1');
+          beep(880, 100);
+        } else beep(660, 60);
+      } else {
+        haze2++;
+        document.getElementById('c2').textContent = haze2;
+        if (!haze2Phase) {
+          haze2Phase = true;
+          log('🔴 2ハゼ開始 ' + peakMv + 'mV レート:' + rate, 'ev2');
+          beep(1320, 80);
+        } else beep(1100, 50);
+      }
+    } else {
+      // ノイズとして除外（ログに小さく記録）
+      log('— ノイズ除外 ' + peakMv + 'mV（直前:' + prePeak + 'mV）');
+    }
+  }
+
   drawWave();
   rafId = requestAnimationFrame(loop);
 }
@@ -392,9 +495,12 @@ function stopDetection() {
 function resetCounts() {
   haze1 = 0; haze2 = 0;
   haze1Phase = false; haze2Phase = false;
-  popHistory = [];
+  popHistory = []; peakHistory60 = [];
+  adaptThreshold = -1; elapsedSec = 0;
+  ringBuf.fill(0); ringIdx = 0;
   document.getElementById('c1').textContent = '0';
   document.getElementById('c2').textContent = '0';
+  document.getElementById('thresh-label').textContent = '閾値: ' + threshold + ' mV';
   log('カウントリセット');
 }
 </script>
