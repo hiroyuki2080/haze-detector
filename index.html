@@ -204,6 +204,13 @@
       </div>
       <input type="range" id="thresh" min="50" max="800" step="1" value="274">
     </div>
+    <div class="param-row">
+      <div class="param-top">
+        <label>入力ゲイン</label>
+        <span id="gain-out">+0 dB</span>
+      </div>
+      <input type="range" id="gaindb" min="0" max="50" step="1" value="0">
+    </div>
   </div>
 </div>
 
@@ -221,7 +228,7 @@
 <footer>特許第6211223号</footer>
 
 <script>
-let audioCtx, stream, source, bpf, analyser, rafId;
+let audioCtx, stream, source, bpf, gainNode, analyser, rafId;
 let running = false;
 let haze1 = 0, haze2 = 0;
 let threshold = 274;
@@ -244,8 +251,11 @@ function updateParams() {
   document.getElementById('thresh-label').textContent = '閾値: ' + threshold + ' mV';
   document.getElementById('threshold-marker').style.left = (threshold/1000*100) + '%';
   if (bpf) { bpf.frequency.value = f; bpf.Q.value = q; }
+  const db = +document.getElementById('gaindb').value;
+  document.getElementById('gain-out').textContent = (db > 0 ? '+' : '') + db + ' dB';
+  if (gainNode) gainNode.gain.value = Math.pow(10, db / 20);
 }
-['freq','qval','thresh'].forEach(id => document.getElementById(id).addEventListener('input', updateParams));
+['freq','qval','thresh','gaindb'].forEach(id => document.getElementById(id).addEventListener('input', updateParams));
 updateParams();
 
 // --- ログ ---
@@ -301,6 +311,9 @@ async function startDetection() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
     });
     source   = audioCtx.createMediaStreamSource(stream);
+    gainNode = audioCtx.createGain();
+    const db = +document.getElementById('gaindb').value;
+    gainNode.gain.value = Math.pow(10, db / 20);
     bpf      = audioCtx.createBiquadFilter();
     bpf.type = 'bandpass';
     bpf.frequency.value = +document.getElementById('freq').value;
@@ -308,7 +321,7 @@ async function startDetection() {
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.1;
-    source.connect(bpf); bpf.connect(analyser);
+    source.connect(gainNode); gainNode.connect(bpf); bpf.connect(analyser);
     running = true;
     document.getElementById('start-btn').disabled = true;
     document.getElementById('stop-btn').disabled  = false;
