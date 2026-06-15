@@ -146,6 +146,7 @@
     <h1>ハゼ検知器</h1>
     <p>10kHz帯域 音圧リアルタイム解析</p>
   </div>
+  <div id="elapsed-badge" style="font-size:12px; padding:4px 10px; border-radius:20px; background:#251a0c; color:#8a7560; border:1px solid #3d2e18; font-family:'Courier New',monospace;">0:00</div>
   <div id="status-badge">待機中</div>
 </header>
 
@@ -212,6 +213,13 @@
       </div>
       <input type="range" id="gaindb" min="0" max="50" step="1" value="0">
     </div>
+    <div class="param-row">
+      <div class="param-top">
+        <label>閾値学習タイミング</label>
+        <span id="phase1-out">開始 0秒 〜 60秒</span>
+      </div>
+      <input type="range" id="phase1start" min="0" max="1500" step="10" value="0">
+    </div>
   </div>
 </div>
 
@@ -256,9 +264,18 @@ let adaptThreshold  = -1;          // -1 = まだ学習中
 let elapsedSec      = 0;           // 開始からの経過秒
 let startTime       = 0;
 let lastSecTick     = 0;
+let phase1Start     = 0;           // フェーズ1開始秒（可変・0〜1500）
+let phase1End       = 60;          // フェーズ1終了秒 = phase1Start + 60
 
 const canvas = document.getElementById('waveform');
 const ctx2d  = canvas.getContext('2d');
+
+// --- 秒数を「分:秒」表記に変換 ---
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m + ':' + String(s).padStart(2, '0');
+}
 
 // --- パラメータ更新 ---
 function updateParams() {
@@ -274,8 +291,13 @@ function updateParams() {
   const db = +document.getElementById('gaindb').value;
   document.getElementById('gain-out').textContent = (db > 0 ? '+' : '') + db + ' dB';
   if (gainNode) gainNode.gain.value = Math.pow(10, db / 20);
+
+  phase1Start = +document.getElementById('phase1start').value;
+  phase1End   = phase1Start + 60;
+  document.getElementById('phase1-out').textContent =
+    '開始 ' + fmtTime(phase1Start) + ' 〜 ' + fmtTime(phase1End);
 }
-['freq','qval','thresh','gaindb'].forEach(id =>
+['freq','qval','thresh','gaindb','phase1start'].forEach(id =>
   document.getElementById(id).addEventListener('input', updateParams));
 updateParams();
 
@@ -354,8 +376,14 @@ async function startDetection() {
     document.getElementById('start-btn').disabled = true;
     document.getElementById('stop-btn').disabled  = false;
     const badge = document.getElementById('status-badge');
-    badge.textContent = '学習中'; badge.className = 'active';
-    log('開始 — 461秒まで閾値を学習します');
+    badge.className = 'active';
+    if (phase1Start === 0) {
+      badge.textContent = '学習中';
+      log('開始 — ' + fmtTime(phase1End) + 'まで閾値を学習します', 'ev1');
+    } else {
+      badge.textContent = '待機中';
+      log('開始 — ' + fmtTime(phase1Start) + '後から閾値学習を行います');
+    }
     loop();
   } catch(e) {
     log('エラー: ' + e.message, 'err');
@@ -394,27 +422,28 @@ function loop() {
   if (now - lastSecTick >= 1000) {
     elapsedSec++;
     lastSecTick = now;
+    document.getElementById('elapsed-badge').textContent = fmtTime(elapsedSec);
 
     // 60秒間ピーク履歴に追加
     peakHistory60.push({ t: now, mv: peakMv });
     peakHistory60 = peakHistory60.filter(p => now - p.t <= AVG_WINDOW_MS);
 
-    // フェーズ1（461〜540秒）：アダプティブ閾値を学習
-    if (elapsedSec >= 461 && elapsedSec <= 540) {
+    // フェーズ1（phase1Start〜phase1End秒）：アダプティブ閾値を学習
+    if (elapsedSec >= phase1Start && elapsedSec <= phase1End) {
       const avg = peakHistory60.reduce((s,p) => s + p.mv, 0) / peakHistory60.length;
       adaptThreshold = Math.round(avg);
       document.getElementById('thresh-label').textContent =
         '適応閾値: ' + adaptThreshold + ' mV（平均:' + Math.round(avg) + '）';
       document.getElementById('threshold-marker').style.left =
         Math.min(100, adaptThreshold / 10) + '%';
-      if (elapsedSec === 461) {
-        log('フェーズ1：閾値学習開始', 'ev1');
+      if (elapsedSec === phase1Start) {
+        log('フェーズ1：閾値学習開始（' + fmtTime(phase1Start) + '〜' + fmtTime(phase1End) + '）', 'ev1');
         document.getElementById('status-badge').textContent = '学習中';
       }
     }
 
-    // フェーズ2（541秒〜）：ハゼ検知モード
-    if (elapsedSec === 541) {
+    // フェーズ2（phase1End+1秒〜）：ハゼ検知モード
+    if (elapsedSec === phase1End + 1) {
       log('フェーズ2：ハゼ検知開始 閾値=' + adaptThreshold + 'mV', 'ev1');
       document.getElementById('status-badge').textContent = '検知中';
     }
@@ -424,7 +453,7 @@ function loop() {
   // ハゼ判定（フェーズ2以降 または 手動テスト時）
   // =====================================================
   const activeThresh = adaptThreshold > 0 ? adaptThreshold : threshold;
-  const inDetectPhase = (adaptThreshold > 0 && elapsedSec >= 541) || adaptThreshold < 0;
+  const inDetectPhase = (adaptThreshold > 0 && elapsedSec >= phase1End + 1) || adaptThreshold < 0;
 
   if (inDetectPhase && peakMv > activeThresh && (now - lastHazeTime) > 250) {
 
@@ -501,6 +530,7 @@ function resetCounts() {
   document.getElementById('c1').textContent = '0';
   document.getElementById('c2').textContent = '0';
   document.getElementById('thresh-label').textContent = '閾値: ' + threshold + ' mV';
+  document.getElementById('elapsed-badge').textContent = '0:00';
   log('カウントリセット');
 }
 </script>
