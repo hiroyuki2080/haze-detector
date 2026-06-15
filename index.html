@@ -216,9 +216,16 @@
     <div class="param-row">
       <div class="param-top">
         <label>閾値学習タイミング</label>
-        <span id="phase1-out">開始 0秒 〜 60秒</span>
+        <span id="phase1-out">開始 0:00 〜 1:00</span>
       </div>
       <input type="range" id="phase1start" min="0" max="1500" step="10" value="0">
+    </div>
+    <div class="param-row">
+      <div class="param-top">
+        <label>ノイズ除外比率</label>
+        <span id="noiseratio-out">25 %</span>
+      </div>
+      <input type="range" id="noiseratio" min="25" max="400" step="5" value="25">
     </div>
   </div>
 </div>
@@ -266,6 +273,7 @@ let startTime       = 0;
 let lastSecTick     = 0;
 let phase1Start     = 0;           // フェーズ1開始秒（可変・0〜1500）
 let phase1End       = 60;          // フェーズ1終了秒 = phase1Start + 60
+let noiseRatio      = 0.25;        // ノイズ除外比率（閾値に対する直前ピークの比率, 25%〜400%）
 
 const canvas = document.getElementById('waveform');
 const ctx2d  = canvas.getContext('2d');
@@ -296,8 +304,12 @@ function updateParams() {
   phase1End   = phase1Start + 60;
   document.getElementById('phase1-out').textContent =
     '開始 ' + fmtTime(phase1Start) + ' 〜 ' + fmtTime(phase1End);
+
+  const nr = +document.getElementById('noiseratio').value;
+  noiseRatio = nr / 100;
+  document.getElementById('noiseratio-out').textContent = nr + ' %';
 }
-['freq','qval','thresh','gaindb','phase1start'].forEach(id =>
+['freq','qval','thresh','gaindb','phase1start','noiseratio'].forEach(id =>
   document.getElementById(id).addEventListener('input', updateParams));
 updateParams();
 
@@ -469,8 +481,8 @@ function loop() {
       if (ringBuf[idx] > prePeak) prePeak = ringBuf[idx];
     }
 
-    // 直前に「閾値の1/4以上」の電圧がなければハゼ（突発スパイク）
-    const noiseFloor = activeThresh / 4;
+    // 直前に「閾値 × ノイズ除外比率」以上の電圧がなければハゼ（突発スパイク）
+    const noiseFloor = activeThresh * noiseRatio;
     const isHaze = prePeak < noiseFloor;
 
     if (isHaze) {
@@ -498,7 +510,7 @@ function loop() {
       }
     } else {
       // ノイズとして除外（ログに小さく記録）
-      log('— ノイズ除外 ' + peakMv + 'mV（直前:' + prePeak + 'mV）');
+      log('— ノイズ除外 ' + peakMv + 'mV（直前:' + prePeak + 'mV ≥ 除外閾値:' + Math.round(noiseFloor) + 'mV）');
     }
   }
 
